@@ -5,6 +5,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from store import pr_store
@@ -57,7 +59,12 @@ def _get_qa_coordinator():
 
 logger = logging.getLogger(__name__)
 
+STATIC_DIR = Path(__file__).parent / "static"
+
 app = FastAPI()
+
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,6 +78,12 @@ PR_DIFF_ACTIONS = {"opened", "synchronize", "reopened"}
 
 class CoordinatorChatRequest(BaseModel):
     prompt: str
+    thread_id: str | None = None
+
+
+class CoordinatorResumeRequest(BaseModel):
+    thread_id: str
+    value: dict
 
 
 def _handle_agent_error(exc: Exception) -> HTTPException:
@@ -80,6 +93,14 @@ def _handle_agent_error(exc: Exception) -> HTTPException:
             detail=f"xpander API error {exc.status_code}: {exc.description}",
         )
     return HTTPException(status_code=502, detail=str(exc))
+
+
+@app.get("/")
+async def chat_ui():
+    index = STATIC_DIR / "index.html"
+    if not index.is_file():
+        raise HTTPException(status_code=404, detail="Chat UI not found")
+    return FileResponse(index)
 
 
 @app.get("/api/prs")
@@ -133,13 +154,28 @@ async def agent_test():
 
 @app.post("/api/agent/coordinator/chat")
 async def coordinator_chat(body: CoordinatorChatRequest):
-    """Chat with the QA coordinator agent."""
+    """Start a QA coordinator run. May pause for human approval (HITL).
+
+    Returns either a completed result, or a paused response carrying a
+    ``thread_id`` and the pending ``request`` to approve via the resume
+    endpoint.
+    """
     prompt = body.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Prompt is required")
     try:
         qa_coordinator = _get_qa_coordinator()
-        return await qa_coordinator.run_agent(prompt)
+        return await qa_coordinator.run_qa(prompt, body.thread_id)
+    except Exception as exc:
+        raise _handle_agent_error(exc) from exc
+
+
+@app.post("/api/agent/coordinator/resume")
+async def coordinator_resume(body: CoordinatorResumeRequest):
+    """Resume a paused QA coordinator run with the human's response."""
+    try:
+        qa_coordinator = _get_qa_coordinator()
+        return await qa_coordinator.resume_qa(body.thread_id, body.value)
     except Exception as exc:
         raise _handle_agent_error(exc) from exc
 
