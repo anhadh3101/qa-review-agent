@@ -1,4 +1,4 @@
-import asyncio, importlib.util, os, re, sys, uuid
+import asyncio, importlib.util, json, os, re, sys, uuid
 from operator import add
 from pathlib import Path
 from typing import Annotated, Literal, Optional, TypedDict
@@ -137,6 +137,9 @@ class QAState(TypedDict):
     next: Optional[str]
     completed: Annotated[list[str], add]
     pr_url: Optional[str]
+    code_findings: Optional[str]
+    requirements: Optional[list]
+    selected_requirements: Optional[list]
 
 
 _PR_URL_RE = re.compile(r"https?://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
@@ -224,12 +227,75 @@ def _ensure_pr_url(state: QAState) -> str:
     return url
 
 
+def _parse_requirements(raw: str) -> list[dict]:
+    """Parse the req agent's JSON output into a list of {id, text} items."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        try:
+            text = text.split("```")[1].removeprefix("json").strip()
+        except IndexError:
+            return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    reqs = data.get("requirements", []) if isinstance(data, dict) else []
+    out = []
+    for i, r in enumerate(reqs):
+        if isinstance(r, str):
+            out.append({"id": str(i), "text": r})
+        elif isinstance(r, dict):
+            out.append(
+                {
+                    "id": str(r.get("id", i)),
+                    "text": r.get("text") or r.get("requirement") or json.dumps(r),
+                }
+            )
+    return out
+
+
 async def _run_specialist_node(name: str, state: QAState) -> dict:
     graph, system_prompt, _ = await _get_specialist(name)
-    task = _original_request(state)
-    pr_url = state.get("pr_url")
-    if pr_url:
-        task = f"{task}\n\nPR URL: {pr_url}"
+    if name == "requirements":
+        task = (
+            "A code analysis specialist examined a PR and described the feature "
+            "below. Your ONLY job is to fetch the requirements / acceptance "
+            "criteria for THIS feature from your knowledge base and return them "
+            "verbatim as structured JSON. Do NOT analyze the PR, do NOT compare "
+            "code against requirements, and do NOT judge whether anything is "
+            "satisfied — that is the coordinator's job.\n\n"
+            "Feature (from code analysis):\n"
+            f"{state.get('code_findings', '')}"
+        )
+    elif name == "code" and state.get("selected_requirements"):
+        reqs_text = "\n".join(
+            f"- {r['text']}" for r in state["selected_requirements"]
+        )
+        task = (
+            f"{_original_request(state)}\n\n"
+            f"PR URL: {state.get('pr_url', '')}\n\n"
+            "Check the PR against these selected requirements and report, for "
+            "each, whether it is Satisfied / Partially satisfied / Missing, "
+            "citing the relevant files/hunks as evidence:\n\n"
+            f"{reqs_text}"
+        )
+    elif name == "code":
+        # First pass: feature summary only. No requirements exist yet, so do
+        # NOT ask the code agent to assess requirement coverage here (otherwise
+        # it will stop and request requirements instead of summarizing).
+        task = (
+            "Summarize what feature or change this PR implements: what it does, "
+            "the main areas/files touched, the type of change, and anything "
+            "noteworthy for a later requirement review. Do NOT ask for or assess "
+            "requirements yet — only summarize the feature.\n\n"
+            f"PR URL: {state.get('pr_url', '')}\n\n"
+            f"Original user request (for context): {_original_request(state)}"
+        )
+    else:
+        task = _original_request(state)
+        pr_url = state.get("pr_url")
+        if pr_url:
+            task = f"{task}\n\nPR URL: {pr_url}"
     result = await graph.ainvoke(
         {"messages": [("system", system_prompt), ("user", task)]}
     )
@@ -245,24 +311,60 @@ async def code_node(state: QAState) -> dict:
     pr_url = _ensure_pr_url(state)
     result = await _run_specialist_node("code", {**state, "pr_url": pr_url})
     result["pr_url"] = pr_url
+    # Persist the code agent's feature analysis so the requirements specialist
+    # can use it to fetch the relevant requirements.
+    code_message = result.get("messages", [])
+    if code_message:
+        result["code_findings"] = code_message[0].content
     return result
 
 
 async def requirements_node(state: QAState) -> dict:
-    return await _run_specialist_node("requirements", state)
+    # Requirements are sourced from the req agent's knowledge base (the feature
+    # doc lives there), so no external connector / HITL is needed here.
+    result = await _run_specialist_node("requirements", state)
+    answer = result["messages"][0].content if result.get("messages") else ""
+    result["requirements"] = _parse_requirements(answer)
+    return result
+
+
+def select_requirements_node(state: QAState) -> dict:
+    """HITL: let the user pick which requirements get sent to the code agent.
+
+    This is a dedicated node (separate from requirements_node) so that resuming
+    after the interrupt does not re-run the requirement agent — it only re-reads
+    the already-fetched requirements from the checkpointed state.
+    """
+    reqs = state.get("requirements") or []
+    if not reqs:
+        return {"selected_requirements": []}
+    chosen = interrupt(
+        {
+            "type": "select_requirements",
+            "prompt": "Select the requirements to send to the code agent.",
+            "requirements": reqs,
+        }
+    )
+    selected_ids = set((chosen or {}).get("selected", []))
+    selected = [r for r in reqs if r["id"] in selected_ids]
+    return {"selected_requirements": selected}
 
 
 def _routing_context(coordinator_prompt: str, completed: list[str]) -> str:
     return (
         f"{coordinator_prompt}\n\n"
         "You coordinate two specialists:\n"
-        "- code: analyzes code, diffs, bugs, security, and code quality.\n"
-        "- requirements: checks specs, acceptance criteria, and requirement "
-        "coverage.\n\n"
+        "- code: inspects the PR. First it summarizes the feature/change; later, "
+        "given selected requirements, it analyzes coverage (satisfied / partial "
+        "/ missing) with evidence.\n"
+        "- requirements: only fetches and structures the relevant requirements "
+        "for the feature from its knowledge base. It does NOT judge coverage.\n\n"
+        "Typical order: code (feature summary) -> requirements (fetch) -> the "
+        "user selects requirements -> code (coverage analysis) -> end.\n"
         f"Specialists already consulted: {completed or 'none'}.\n"
-        "Decide which specialist to delegate to next, or 'end' when the review "
-        "is complete. Avoid repeating a specialist that already ran unless it "
-        "is clearly necessary."
+        "Decide which specialist to delegate to next, or 'end' when the coverage "
+        "analysis is done. Note the code specialist is expected to run twice "
+        "(summary, then coverage), so re-running it for coverage is correct."
     )
 
 
@@ -313,11 +415,18 @@ def _route(state: QAState) -> str:
     return state["next"]
 
 
+def _route_after_selection(state: QAState) -> str:
+    # Send the selected requirements to the code agent for coverage analysis;
+    # if nothing was selected, hand back to the supervisor to wrap up.
+    return "code" if state.get("selected_requirements") else "supervisor"
+
+
 def build_supervisor_graph(checkpointer):
     builder = StateGraph(QAState)
     builder.add_node("supervisor", supervisor_node)
     builder.add_node("code", code_node)
     builder.add_node("requirements", requirements_node)
+    builder.add_node("select_requirements", select_requirements_node)
 
     builder.add_edge(START, "supervisor")
     builder.add_conditional_edges(
@@ -326,7 +435,12 @@ def build_supervisor_graph(checkpointer):
         {"code": "code", "requirements": "requirements", "end": END},
     )
     builder.add_edge("code", "supervisor")
-    builder.add_edge("requirements", "supervisor")
+    builder.add_edge("requirements", "select_requirements")
+    builder.add_conditional_edges(
+        "select_requirements",
+        _route_after_selection,
+        {"code": "code", "supervisor": "supervisor"},
+    )
 
     return builder.compile(checkpointer=checkpointer)
 

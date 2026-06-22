@@ -351,6 +351,48 @@
       color: #f87171;
     }
 
+    .hitl-req-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .req-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-start;
+      font-size: 0.875rem;
+      line-height: 1.4;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .req-row input {
+      margin-top: 0.2rem;
+      accent-color: var(--success);
+      flex-shrink: 0;
+    }
+
+    .hitl-select-actions {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .hitl-select-actions button {
+      background: none;
+      border: none;
+      color: var(--hitl-text);
+      font-family: inherit;
+      font-size: 0.75rem;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+    }
+
     .btn-approve {
       background: var(--success);
       color: #052e16;
@@ -586,9 +628,51 @@
 
       if (request.type === "request_pr_url") {
         showPrUrlHitl(request);
+      } else if (request.type === "select_requirements") {
+        showRequirementSelectHitl(request);
       } else {
         showDelegationHitl(request);
       }
+    }
+
+    function showRequirementSelectHitl(request) {
+      const items = request.requirements || [];
+      const rows = items.map((r) => `
+        <label class="req-row">
+          <input type="checkbox" value="${escapeHtml(r.id)}" checked />
+          <span>${escapeHtml(r.text)}</span>
+        </label>
+      `).join("");
+
+      hitlEl.innerHTML = `
+        <div class="hitl-title">Select requirements</div>
+        <div class="hitl-reason">${escapeHtml(request.prompt || "")}</div>
+        ${items.length ? `
+          <div class="hitl-select-actions">
+            <button type="button" data-select="all">Select all</button>
+            <button type="button" data-select="none">Clear all</button>
+          </div>
+          <div class="hitl-req-list">${rows}</div>
+        ` : `<div class="hitl-reason"><em>No requirements were returned.</em></div>`}
+        <div class="hitl-actions">
+          <button type="button" class="btn-approve" id="req-submit">Send to code agent</button>
+        </div>
+      `;
+
+      hitlEl.querySelectorAll("[data-select]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const checked = btn.dataset.select === "all";
+          hitlEl.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+            cb.checked = checked;
+          });
+        });
+      });
+
+      hitlEl.querySelector("#req-submit").addEventListener("click", () => {
+        const selected = [...hitlEl.querySelectorAll('input[type="checkbox"]:checked')]
+          .map((cb) => cb.value);
+        resume({ selected });
+      });
     }
 
     function showDelegationHitl(request) {

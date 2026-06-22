@@ -2,6 +2,7 @@ import asyncio
 import os
 
 from dotenv import load_dotenv
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from xpander_sdk import Agents
@@ -31,10 +32,34 @@ async def load_xpander_agent():
     return await agents.aget(AGENT_ID)
 
 
+def _make_kb_tool(xpander_agent):
+    """Wrap the agent's linked knowledge base(s) as a LangChain search tool."""
+
+    @tool("search_requirements_kb")
+    async def search_requirements_kb(query: str, num_documents: int = 5) -> str:
+        """Search the requirements knowledge base for specs, acceptance criteria,
+        and related context relevant to the query. Use this to look up the
+        requirements a pull request should satisfy."""
+        knowledge_bases = await xpander_agent.aget_knowledge_bases()
+        results = []
+        for kb in knowledge_bases:
+            results.extend(await kb.asearch(search_query=query, top_k=num_documents))
+        results.sort(key=lambda r: r.score, reverse=True)
+        top = results[:num_documents]
+        if not top:
+            return "No relevant requirement knowledge found."
+        return "\n\n---\n\n".join(r.content for r in top)
+
+    return search_requirements_kb
+
+
 def build_react_agent(xpander_agent):
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model="gpt-5.1", temperature=0)
     system_prompt = create_system_prompt(xpander_agent.instructions)
-    graph = create_react_agent(llm, [])
+    tools = list(xpander_agent.tools.functions)
+    if xpander_agent.search_knowledge:
+        tools.append(_make_kb_tool(xpander_agent))
+    graph = create_react_agent(llm, tools)
     return graph, system_prompt
 
 
@@ -108,7 +133,8 @@ def build_requirement_review_prompt(record: dict) -> str:
         f"Head branch: {record['head_ref']}\n"
         f"URL: {record['html_url']}\n\n"
         f"Focus on: requirement coverage, acceptance criteria, spec alignment, and gaps.\n"
-        f"Use Notion tools to look up relevant specs where needed.\n\n"
+        f"Use the search_requirements_kb tool to look up the relevant requirements "
+        f"and specs from the knowledge base where needed.\n\n"
         f"Diff:\n```diff\n{diff}\n```"
     )
 
