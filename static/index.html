@@ -90,9 +90,86 @@
       flex: 1;
       overflow-y: auto;
       padding: 1.25rem;
+    }
+
+    .agent-board {
       display: flex;
       flex-direction: column;
       gap: 1rem;
+      max-width: 1100px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .coordinator-row {
+      display: flex;
+      justify-content: center;
+      width: 100%;
+    }
+
+    .coordinator-card {
+      width: min(100%, 640px);
+    }
+
+    .specialists-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    .agent-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-direction: column;
+      min-height: 140px;
+      overflow: hidden;
+    }
+
+    .coordinator-card.agent-card {
+      border-color: rgba(59, 130, 246, 0.45);
+      box-shadow: 0 4px 24px rgba(59, 130, 246, 0.08);
+    }
+
+    .agent-card-header {
+      padding: 0.625rem 1rem;
+      border-bottom: 1px solid var(--border);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.6875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      background: var(--surface-2);
+      font-weight: 500;
+    }
+
+    .coordinator-card .agent-card-header {
+      color: var(--accent);
+    }
+
+    .agent-card-body {
+      padding: 0.75rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.625rem;
+      max-height: 300px;
+      overflow-y: auto;
+      flex: 1;
+    }
+
+    .agent-card-body .empty-card {
+      color: var(--muted);
+      font-size: 0.8125rem;
+      text-align: center;
+      padding: 1.25rem 0.5rem;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 720px) {
+      .specialists-row {
+        grid-template-columns: 1fr;
+      }
     }
 
     .empty-state {
@@ -112,7 +189,7 @@
     }
 
     .msg {
-      max-width: min(640px, 85%);
+      width: 100%;
       padding: 0.75rem 1rem;
       border-radius: var(--radius);
       line-height: 1.55;
@@ -122,21 +199,18 @@
     }
 
     .msg.user {
-      align-self: flex-end;
       background: var(--user-bg);
       border-bottom-right-radius: 4px;
     }
 
     .msg.assistant {
-      align-self: flex-start;
       background: var(--assistant-bg);
       border: 1px solid var(--border);
       border-bottom-left-radius: 4px;
     }
 
     .msg.specialist {
-      align-self: flex-start;
-      background: var(--surface);
+      background: var(--surface-2);
       border: 1px solid var(--border);
       border-left: 3px solid var(--accent);
       border-bottom-left-radius: 4px;
@@ -152,21 +226,19 @@
     }
 
     .msg.error {
-      align-self: center;
       background: #2a1515;
       border: 1px solid #7f1d1d;
       color: #fca5a5;
-      max-width: 90%;
     }
 
     .typing {
-      align-self: flex-start;
       display: flex;
       gap: 4px;
       padding: 0.875rem 1rem;
       background: var(--assistant-bg);
       border: 1px solid var(--border);
       border-radius: var(--radius);
+      align-self: flex-start;
     }
 
     .typing span {
@@ -251,6 +323,34 @@
 
     .hitl-actions button:active { transform: scale(0.98); }
 
+    .hitl-pr-form {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .hitl-input {
+      font-family: inherit;
+      font-size: 0.875rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--hitl-border);
+      background: rgba(0, 0, 0, 0.2);
+      color: var(--hitl-text);
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    .hitl-input:focus {
+      outline: none;
+      border-color: var(--success);
+    }
+
+    .hitl-error {
+      font-size: 0.75rem;
+      color: #f87171;
+    }
+
     .btn-approve {
       background: var(--success);
       color: #052e16;
@@ -324,6 +424,24 @@
       <strong>Start a review</strong>
       Ask about a pull request, code quality, or requirement coverage. You'll approve each specialist delegation before it runs.
     </div>
+    <div id="agent-board" hidden>
+      <div class="coordinator-row">
+        <div class="agent-card coordinator-card">
+          <div class="agent-card-header">Coordinator</div>
+          <div class="agent-card-body" id="card-coordinator"></div>
+        </div>
+      </div>
+      <div class="specialists-row">
+        <div class="agent-card">
+          <div class="agent-card-header">Code</div>
+          <div class="agent-card-body" id="card-code"></div>
+        </div>
+        <div class="agent-card">
+          <div class="agent-card-header">Requirements</div>
+          <div class="agent-card-body" id="card-requirements"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="hitl" hidden></div>
@@ -337,12 +455,37 @@
     let threadId = null;
     let busy = false;
     let pendingApproval = false;
+    let groups = { coordinator: [], code: [], requirements: [] };
 
     const messagesEl = document.getElementById("messages");
+    const boardEl = document.getElementById("agent-board");
+    const cardEls = {
+      coordinator: document.getElementById("card-coordinator"),
+      code: document.getElementById("card-code"),
+      requirements: document.getElementById("card-requirements"),
+    };
     const hitlEl = document.getElementById("hitl");
     const promptEl = document.getElementById("prompt");
     const sendBtn = document.getElementById("send");
     const newChatBtn = document.getElementById("new-chat");
+
+    const CARD_EMPTY = {
+      coordinator: "User messages and coordinator replies appear here.",
+      code: "Code analysis results will appear here.",
+      requirements: "Requirement analysis results will appear here.",
+    };
+
+    function tabFor(agent) {
+      if (agent === "code" || agent === "requirements") return agent;
+      return "coordinator";
+    }
+
+    function styleFor(agent) {
+      if (agent === "error") return "error";
+      if (agent === "user") return "user";
+      if (agent === "coordinator") return "assistant";
+      return "specialist";
+    }
 
     function setBusy(value) {
       busy = value;
@@ -351,31 +494,69 @@
       newChatBtn.disabled = value;
     }
 
-    function hideEmptyState() {
-      const empty = document.getElementById("empty-state");
-      if (empty) empty.remove();
+    function hasAnyMessages() {
+      return Object.values(groups).some((items) => items.length > 0);
     }
 
-    function appendMessage(role, text, label) {
-      hideEmptyState();
+    function hideEmptyState() {
+      const empty = document.getElementById("empty-state");
+      if (empty) empty.hidden = true;
+      boardEl.hidden = false;
+    }
+
+    function showEmptyState() {
+      const empty = document.getElementById("empty-state");
+      if (empty) empty.hidden = false;
+      boardEl.hidden = true;
+    }
+
+    function createMessageEl(role, text) {
       const div = document.createElement("div");
       div.className = `msg ${role}`;
-      if (label) {
-        const lbl = document.createElement("div");
-        lbl.className = "msg-label";
-        lbl.textContent = label;
-        div.appendChild(lbl);
-      }
-      const body = document.createElement("div");
-      body.textContent = text;
-      div.appendChild(body);
-      messagesEl.appendChild(div);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      div.textContent = text;
       return div;
     }
 
+    function renderCard(agent, items) {
+      const body = cardEls[agent];
+      body.innerHTML = "";
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-card";
+        empty.textContent = CARD_EMPTY[agent];
+        body.appendChild(empty);
+        return;
+      }
+      for (const m of items) {
+        body.appendChild(createMessageEl(styleFor(m.agent), m.text));
+      }
+      body.scrollTop = body.scrollHeight;
+    }
+
+    function setMessages(messages) {
+      groups = { coordinator: [], code: [], requirements: [] };
+      for (const m of messages) {
+        groups[tabFor(m.agent)].push(m);
+      }
+      renderAll();
+    }
+
+    function renderAll() {
+      if (!hasAnyMessages()) {
+        showEmptyState();
+        return;
+      }
+      hideEmptyState();
+      renderCard("coordinator", groups.coordinator);
+      renderCard("code", groups.code);
+      renderCard("requirements", groups.requirements);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
     function appendError(text) {
-      appendMessage("error", text);
+      hideEmptyState();
+      groups.coordinator.push({ agent: "error", text });
+      renderAll();
     }
 
     let typingEl = null;
@@ -385,7 +566,8 @@
       typingEl = document.createElement("div");
       typingEl.className = "typing";
       typingEl.innerHTML = "<span></span><span></span><span></span>";
-      messagesEl.appendChild(typingEl);
+      cardEls.coordinator.appendChild(typingEl);
+      cardEls.coordinator.scrollTop = cardEls.coordinator.scrollHeight;
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
@@ -400,12 +582,20 @@
       pendingApproval = true;
       promptEl.disabled = true;
       sendBtn.disabled = true;
+      hitlEl.hidden = false;
 
+      if (request.type === "request_pr_url") {
+        showPrUrlHitl(request);
+      } else {
+        showDelegationHitl(request);
+      }
+    }
+
+    function showDelegationHitl(request) {
       const completed = request.completed?.length
         ? `Already consulted: ${request.completed.join(", ")}`
         : "No specialists consulted yet.";
 
-      hitlEl.hidden = false;
       hitlEl.innerHTML = `
         <div class="hitl-title">Approval required</div>
         <div class="hitl-specialist">Delegate to <code>${escapeHtml(request.proposed_next)}</code> specialist</div>
@@ -420,6 +610,47 @@
       hitlEl.querySelectorAll("[data-action]").forEach((btn) => {
         btn.addEventListener("click", () => resume({ action: btn.dataset.action }));
       });
+    }
+
+    const PR_URL_RE = /^https?:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/;
+
+    function showPrUrlHitl(request) {
+      const prompt = request.prompt || "Paste the GitHub PR URL.";
+      hitlEl.innerHTML = `
+        <div class="hitl-title">PR details needed</div>
+        <div class="hitl-reason">${escapeHtml(prompt)}</div>
+        <div class="hitl-pr-form">
+          <input type="url" id="pr-url-input" class="hitl-input"
+            placeholder="https://github.com/owner/repo/pull/123" autocomplete="off" />
+          <div class="hitl-error" id="pr-url-error" hidden>Enter a valid GitHub PR URL.</div>
+          <div class="hitl-actions">
+            <button type="button" class="btn-approve" id="pr-url-submit">Submit</button>
+          </div>
+        </div>
+      `;
+
+      const input = hitlEl.querySelector("#pr-url-input");
+      const errorEl = hitlEl.querySelector("#pr-url-error");
+      const submitBtn = hitlEl.querySelector("#pr-url-submit");
+
+      const submit = () => {
+        const value = input.value.trim();
+        if (!PR_URL_RE.test(value)) {
+          errorEl.hidden = false;
+          input.focus();
+          return;
+        }
+        resume({ pr_url: value });
+      };
+
+      submitBtn.addEventListener("click", submit);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submit();
+        }
+      });
+      input.focus();
     }
 
     function hideHitl() {
@@ -441,6 +672,10 @@
     async function handleResponse(data) {
       threadId = data.thread_id;
 
+      if (data.messages) {
+        setMessages(data.messages);
+      }
+
       if (data.status === "paused") {
         hideTyping();
         setBusy(false);
@@ -451,11 +686,6 @@
       hideHitl();
       hideTyping();
       setBusy(false);
-      threadId = null;
-
-      if (data.result) {
-        appendMessage("assistant", data.result);
-      }
     }
 
     async function apiPost(url, body) {
@@ -476,13 +706,17 @@
       const text = promptEl.value.trim();
       if (!text || busy || pendingApproval) return;
 
-      appendMessage("user", text);
+      groups.coordinator.push({ agent: "user", text });
+      renderAll();
       promptEl.value = "";
       setBusy(true);
       showTyping();
 
       try {
-        const data = await apiPost("/api/agent/coordinator/chat", { prompt: text });
+        const data = await apiPost("/api/agent/coordinator/chat", {
+          prompt: text,
+          thread_id: threadId,
+        });
         await handleResponse(data);
       } catch (err) {
         hideTyping();
@@ -497,13 +731,6 @@
       hideHitl();
       setBusy(true);
       showTyping();
-
-      const actionLabel =
-        value.action === "approve"
-          ? `Approved delegation`
-          : `Rejected — finishing review`;
-
-      appendMessage("user", actionLabel, "You");
 
       try {
         const data = await apiPost("/api/agent/coordinator/resume", {
@@ -522,14 +749,10 @@
       if (busy) return;
       threadId = null;
       pendingApproval = false;
+      groups = { coordinator: [], code: [], requirements: [] };
       hideHitl();
       hideTyping();
-      messagesEl.innerHTML = `
-        <div class="empty-state" id="empty-state">
-          <strong>Start a review</strong>
-          Ask about a pull request, code quality, or requirement coverage. You'll approve each specialist delegation before it runs.
-        </div>
-      `;
+      showEmptyState();
       promptEl.value = "";
       promptEl.disabled = false;
       sendBtn.disabled = false;

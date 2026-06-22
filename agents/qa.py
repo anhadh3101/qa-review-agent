@@ -1,9 +1,10 @@
-import asyncio, importlib.util, os, sys, uuid
+import asyncio, importlib.util, os, re, sys, uuid
 from operator import add
 from pathlib import Path
 from typing import Annotated, Literal, Optional, TypedDict
 
 from dotenv import load_dotenv
+from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -135,6 +136,10 @@ class QAState(TypedDict):
     messages: Annotated[list, add_messages]
     next: Optional[str]
     completed: Annotated[list[str], add]
+    pr_url: Optional[str]
+
+
+_PR_URL_RE = re.compile(r"https?://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
 
 class Route(BaseModel):
@@ -186,21 +191,61 @@ def _original_request(state: QAState) -> str:
     return _extract_final_content(state)
 
 
+def _find_pr_url(messages) -> Optional[str]:
+    for message in messages:
+        content = getattr(message, "content", "") or ""
+        match = _PR_URL_RE.search(content)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _coerce_pr_url(value) -> Optional[str]:
+    if isinstance(value, dict):
+        value = value.get("pr_url")
+    if not isinstance(value, str):
+        return None
+    match = _PR_URL_RE.search(value)
+    return match.group(0) if match else None
+
+
+def _ensure_pr_url(state: QAState) -> str:
+    """Return a PR URL from state/messages, pausing via HITL to ask if absent."""
+    url = state.get("pr_url") or _find_pr_url(state["messages"])
+    while not url:
+        provided = interrupt(
+            {
+                "type": "request_pr_url",
+                "prompt": "Which PR should I review? Paste the GitHub PR URL "
+                "(e.g. https://github.com/owner/repo/pull/123).",
+            }
+        )
+        url = _coerce_pr_url(provided)
+    return url
+
+
 async def _run_specialist_node(name: str, state: QAState) -> dict:
     graph, system_prompt, _ = await _get_specialist(name)
     task = _original_request(state)
+    pr_url = state.get("pr_url")
+    if pr_url:
+        task = f"{task}\n\nPR URL: {pr_url}"
     result = await graph.ainvoke(
         {"messages": [("system", system_prompt), ("user", task)]}
     )
     answer = _extract_final_content(result)
     return {
-        "messages": [("ai", f"[{name} specialist]\n{answer}")],
+        "messages": [AIMessage(content=answer, name=name)],
         "completed": [name],
     }
 
 
 async def code_node(state: QAState) -> dict:
-    return await _run_specialist_node("code", state)
+    # PR analysis requires a PR URL; gather it (HITL) only on this path.
+    pr_url = _ensure_pr_url(state)
+    result = await _run_specialist_node("code", {**state, "pr_url": pr_url})
+    result["pr_url"] = pr_url
+    return result
 
 
 async def requirements_node(state: QAState) -> dict:
@@ -243,6 +288,7 @@ async def supervisor_node(state: QAState) -> dict:
                 *state["messages"],
             ]
         )
+        final.name = "coordinator"
         return {"next": "end", "messages": [final]}
 
     # HITL: pause for human approval before delegating to a specialist.
@@ -300,18 +346,36 @@ def _interrupt_payload(result: dict):
     return getattr(first, "value", first)
 
 
+def _agent_of(message) -> str:
+    if getattr(message, "type", None) == "human":
+        return "user"
+    return getattr(message, "name", None) or "coordinator"
+
+
+def _serialize_messages(result: dict) -> list[dict]:
+    out = []
+    for message in result.get("messages", []):
+        content = getattr(message, "content", None)
+        if content:
+            out.append({"agent": _agent_of(message), "text": content})
+    return out
+
+
 def _format_result(result: dict, thread_id: str) -> dict:
+    messages = _serialize_messages(result)
     payload = _interrupt_payload(result)
     if payload is not None:
         return {
             "status": "paused",
             "thread_id": thread_id,
             "request": payload,
+            "messages": messages,
         }
     return {
         "status": "completed",
         "thread_id": thread_id,
         "result": _extract_final_content(result),
+        "messages": messages,
     }
 
 
@@ -320,7 +384,8 @@ async def run_qa(prompt: str, thread_id: Optional[str] = None) -> dict:
     thread_id = thread_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     result = await get_qa_graph().ainvoke(
-        {"messages": [("user", prompt)], "completed": []}, config=config
+        {"messages": [("user", prompt)], "completed": []},
+        config=config,
     )
     return _format_result(result, thread_id)
 

@@ -32,10 +32,10 @@ async def load_xpander_agent():
 
 
 def build_react_agent(xpander_agent):
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model="gpt-5", temperature=0)
     system_prompt = create_system_prompt(xpander_agent.instructions)
     # No tools for now — diff is passed in the prompt
-    graph = create_react_agent(llm, [])
+    graph = create_react_agent(llm, xpander_agent.tools.functions)
     return graph, system_prompt
 
 
